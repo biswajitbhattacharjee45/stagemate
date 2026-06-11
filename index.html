@@ -607,6 +607,9 @@ function App() {
   const [q, setQ] = useState("");
   const [langF, setLangF] = useState("ALL");
   const [repOnly, setRepOnly] = useState(false);
+  const [lyrOnly, setLyrOnly] = useState(false);
+  const [mdF, setMdF] = useState("");
+  const [sortBy, setSortBy] = useState("title");
   const [openSong, setOpenSong] = useState(null);
   const [showAdd, setShowAdd] = useState(false);
   const [setlist, setSetlist] = useState(() => { try { return JSON.parse(localStorage.getItem(LS_SET)) || []; } catch { return []; } });
@@ -661,15 +664,30 @@ function App() {
     fsSaveSong(obj);
   };
 
+  const mdList = useMemo(() => [...new Set(songs.map(s => s.md).filter(Boolean))].sort(), [songs]);
+
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return songs.filter(s => {
+    const arr = songs.filter(s => {
       if (langF !== "ALL" && s.lang !== langF) return false;
       if (repOnly && !s.repertoire) return false;
+      if (lyrOnly && !(s.lyrics||"").trim()) return false;
+      if (mdF && s.md !== mdF) return false;
       if (!needle) return true;
       return (s.title + " " + s.source + " " + (s.md||"") + " " + (s.lyr||"")).toLowerCase().includes(needle);
-    }).sort((a,b) => a.title.localeCompare(b.title));
-  }, [songs, q, langF, repOnly]);
+    });
+    if (sortBy === "year") arr.sort((a,b) => (a.year||9999) - (b.year||9999) || a.title.localeCompare(b.title));
+    else if (sortBy === "film") arr.sort((a,b) => (a.source||"").localeCompare(b.source||"") || a.title.localeCompare(b.title));
+    else arr.sort((a,b) => a.title.localeCompare(b.title));
+    return arr;
+  }, [songs, q, langF, repOnly, lyrOnly, mdF, sortBy]);
+
+  const surprisePick = () => {
+    const pool = songs.filter(s => s.repertoire);
+    const from = pool.length ? pool : songs;
+    if (!from.length) return;
+    setOpenSong(from[Math.floor(Math.random() * from.length)]);
+  };
 
   const inSet = (id) => setlist.includes(id);
   const toggleSet = (id) => { const arr = inSet(id) ? setlist.filter(x => x !== id) : [...setlist, id]; setSetlist(arr); fsSaveSetlist(arr); };
@@ -717,8 +735,8 @@ function App() {
       <div style={{ padding: "26px 18px 6px", maxWidth: 640, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
           <div>
-            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 30, fontWeight: 800, color: T.text, letterSpacing: -0.5 }}>
-              Stage<span style={{ color: T.amber }}>Mate</span> <span style={{ fontSize: 18 }}>🎙️</span>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 32, fontWeight: 800, letterSpacing: -0.5, lineHeight: 1.05 }}>
+              <span style={{ color: T.text }}>Stage</span><span style={{ background: `linear-gradient(120deg, ${T.amber2}, ${T.amber} 60%, #e8842a)`, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", textShadow: "none" }}>Mate</span> <span style={{ fontSize: 19 }}>🎙️</span>
             </div>
             <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>
               Kishore Kumar Edition · {songs.length} songs · {counts.rep} in repertoire
@@ -738,63 +756,103 @@ function App() {
 
       {tab === "songs" && (
         <div style={{ maxWidth: 640, margin: "0 auto", padding: "12px 18px" }}>
-          {/* ── SEARCH ── */}
-          <div style={{ position: "relative", marginBottom: 14 }}>
-            <span style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", fontSize: 16, color: T.sub }}>🔍</span>
-            <input ref={searchRef} value={q} onChange={e => setQ(e.target.value)}
-              placeholder="Search song, film, music director…"
-              style={{ width: "100%", padding: "15px 44px", background: T.card, border: `1.5px solid ${q ? T.amber : T.border}`, borderRadius: 16, color: T.text, fontSize: 16, boxSizing: "border-box", outline: "none" }} />
-            {q && <button onClick={() => { setQ(""); searchRef.current?.focus(); }} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: T.card2, border: "none", borderRadius: "50%", width: 26, height: 26, color: T.sub, cursor: "pointer", fontSize: 13 }}>✕</button>}
+          {/* ── SEARCH + SURPRISE ── */}
+          <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+            <div style={{ position: "relative", flex: 1 }}>
+              <span style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", fontSize: 16, color: T.sub }}>🔍</span>
+              <input ref={searchRef} value={q} onChange={e => setQ(e.target.value)}
+                placeholder="Search song, film, composer…"
+                style={{ width: "100%", padding: "15px 44px", background: T.card, border: `1.5px solid ${q ? T.amber : T.border}`, borderRadius: 16, color: T.text, fontSize: 16, boxSizing: "border-box", outline: "none", boxShadow: q ? `0 0 24px ${T.amber}22` : "none", transition: "all .2s" }} />
+              {q && <button onClick={() => { setQ(""); searchRef.current?.focus(); }} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: T.card2, border: "none", borderRadius: "50%", width: 26, height: 26, color: T.sub, cursor: "pointer", fontSize: 13 }}>✕</button>}
+            </div>
+            <button onClick={surprisePick} title="Open a random song from your repertoire" style={{
+              background: `linear-gradient(160deg, ${T.card2}, ${T.card})`, border: `1.5px solid ${T.border}`,
+              borderRadius: 16, width: 54, fontSize: 22, cursor: "pointer", flexShrink: 0, transition: "all .15s",
+            }}>🎲</button>
           </div>
 
-          {/* ── FILTERS ── */}
-          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 6, marginBottom: 10 }}>
+          {/* ── LANGUAGE + STATUS CHIPS ── */}
+          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 6, marginBottom: 8 }}>
             <Chip active={langF === "ALL"} color={T.text} onClick={() => setLangF("ALL")}>All ({songs.length})</Chip>
             <Chip active={langF === "H"} color={T.hindi} onClick={() => setLangF("H")}>Hindi ({counts.H})</Chip>
             <Chip active={langF === "B"} color={T.bangla} onClick={() => setLangF("B")}>Bangla ({counts.B})</Chip>
             <Chip active={langF === "R"} color={T.rabindra} onClick={() => setLangF("R")}>Rabindra ({counts.R})</Chip>
             <Chip active={repOnly} color={T.green} onClick={() => setRepOnly(r => !r)}>⭐ Repertoire</Chip>
+            <Chip active={lyrOnly} color={T.violet} onClick={() => setLyrOnly(v => !v)}>📜 Stage-ready ({songs.filter(s => (s.lyrics||"").trim()).length})</Chip>
           </div>
 
-          {/* ── DISCLAIMER (shows once-ish, small) ── */}
-          <div style={{ fontSize: 10.5, color: T.sub, marginBottom: 14, lineHeight: 1.5, opacity: .8 }}>
-            ℹ️ Scales marked are approximate — verify on your harmonium & edit. Credits are editable. Lyrics open from licensed sources.
+          {/* ── COMPOSER + SORT ROW ── */}
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <select value={mdF} onChange={e => setMdF(e.target.value)} style={{
+              flex: 1, padding: "9px 12px", background: T.card, border: `1.5px solid ${mdF ? T.amber : T.border}`,
+              borderRadius: 12, color: mdF ? T.amber2 : T.sub, fontSize: 12.5, fontWeight: 600, outline: "none",
+            }}>
+              <option value="">🎼 All composers</option>
+              {mdList.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+            <select value={sortBy} onChange={e => setSortBy(e.target.value)} style={{
+              width: 132, padding: "9px 12px", background: T.card, border: `1.5px solid ${T.border}`,
+              borderRadius: 12, color: T.sub, fontSize: 12.5, fontWeight: 600, outline: "none",
+            }}>
+              <option value="title">A → Z</option>
+              <option value="year">By year</option>
+              <option value="film">By film</option>
+            </select>
+          </div>
+
+          {/* ── RESULT COUNT ── */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+            <div style={{ fontSize: 11, color: T.sub, letterSpacing: .5 }}>{filtered.length} song{filtered.length !== 1 ? "s" : ""}{mdF ? ` · ${mdF}` : ""}</div>
+            <div style={{ fontSize: 9.5, color: T.sub, opacity: .65 }}>scales approx — verify on harmonium</div>
           </div>
 
           {/* ── SONG LIST ── */}
           {filtered.length === 0 ? (
-            <div style={{ textAlign: "center", padding: "50px 20px", color: T.sub }}>
-              <div style={{ fontSize: 36, marginBottom: 10 }}>🎵</div>
-              <div style={{ fontSize: 14 }}>No songs found{q ? ` for "${q}"` : ""}.</div>
-              <button onClick={() => setShowAdd(true)} style={{ marginTop: 14, background: T.amber, color: "#1a1207", border: "none", borderRadius: 12, padding: "10px 20px", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>＋ Add it now</button>
+            <div style={{ textAlign: "center", padding: "50px 20px", color: T.sub, background: T.panel, borderRadius: 20, border: `1px dashed ${T.border}` }}>
+              <div style={{ fontSize: 40, marginBottom: 10 }}>🎙️</div>
+              <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, color: T.text, marginBottom: 4 }}>No songs match</div>
+              <div style={{ fontSize: 12.5, marginBottom: 4 }}>{q ? `Nothing found for "${q}".` : "Try removing a filter."}</div>
+              {(repOnly || lyrOnly || mdF) && <button onClick={() => { setRepOnly(false); setLyrOnly(false); setMdF(""); }} style={{ marginTop: 10, background: T.card2, color: T.sub, border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer", marginRight: 8 }}>Clear filters</button>}
+              <button onClick={() => setShowAdd(true)} style={{ marginTop: 10, background: T.amber, color: "#1a1207", border: "none", borderRadius: 10, padding: "8px 18px", fontWeight: 800, fontSize: 12, cursor: "pointer" }}>＋ Add this song</button>
             </div>
           ) : filtered.map(s => {
             const meta = langMeta[s.lang] || langMeta.H;
             const sc = s.myScale || s.scale;
+            const p = parseScale(sc);
+            const hasLyr = (s.lyrics||"").trim();
             return (
               <div key={s.id} onClick={() => setOpenSong(s)} style={{
-                background: T.card, border: `1px solid ${T.border}`, borderLeft: `3px solid ${meta.color}`,
-                borderRadius: 14, padding: "14px 16px", marginBottom: 10, cursor: "pointer",
-                display: "flex", alignItems: "center", gap: 12,
+                background: `linear-gradient(135deg, ${T.card} 0%, ${T.panel} 100%)`,
+                border: `1px solid ${T.border}`, borderLeft: `3px solid ${meta.color}`,
+                borderRadius: 16, padding: "13px 14px 13px 16px", marginBottom: 10, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 12, position: "relative", overflow: "hidden",
               }}>
+                {hasLyr && <div style={{ position: "absolute", top: 0, right: 0, width: 70, height: 70, background: `radial-gradient(circle at top right, ${T.violet}14, transparent 70%)`, pointerEvents: "none" }} />}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {s.repertoire && <span style={{ color: T.green }}>⭐ </span>}{s.title}{(s.lyrics||"").trim() && <span style={{ color: T.violet, fontSize: 12 }}> 📜</span>}
+                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16.5, fontWeight: 700, color: T.text, marginBottom: 4, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {s.repertoire && <span style={{ color: T.green }}>⭐ </span>}{s.title}
                   </div>
-                  <div style={{ fontSize: 11.5, color: T.sub }}>
-                    {s.source}{s.year ? ` · ${s.year}` : ""} · {s.md || "—"}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 11, color: T.sub }}>{s.source}{s.year ? ` · ${s.year}` : ""}</span>
+                    <span style={{ fontSize: 10, color: meta.color, background: meta.color + "16", borderRadius: 20, padding: "1px 8px", fontWeight: 700 }}>{s.md || "—"}</span>
+                    {hasLyr && <span style={{ fontSize: 10, color: T.violet, background: T.violet + "1a", borderRadius: 20, padding: "1px 8px", fontWeight: 700 }}>📜 ready</span>}
                   </div>
                 </div>
                 {sc && (
-                  <div style={{ background: T.card2, borderRadius: 10, padding: "7px 11px", textAlign: "center", flexShrink: 0 }}>
-                    <div style={{ fontFamily: "'Fraunces', serif", fontSize: 14, fontWeight: 800, color: s.myScale ? T.amber2 : T.sub }}>{(parseScale(sc)?.root || sc)}{parseScale(sc)?.minor ? "m" : ""}</div>
+                  <div title={s.myScale ? "Your scale" : "Original scale (approx)"} style={{
+                    background: s.myScale ? `linear-gradient(160deg, ${T.amber}26, ${T.card2})` : T.card2,
+                    border: `1px solid ${s.myScale ? T.amber + "55" : T.border}`,
+                    borderRadius: 11, padding: "6px 10px", textAlign: "center", flexShrink: 0, minWidth: 40,
+                  }}>
+                    <div style={{ fontFamily: "'Fraunces', serif", fontSize: 15, fontWeight: 800, color: s.myScale ? T.amber2 : T.sub, lineHeight: 1.1 }}>{(p?.root || sc)}{p?.minor ? "m" : ""}</div>
+                    <div style={{ fontSize: 7.5, color: T.sub, letterSpacing: 1, marginTop: 1 }}>{s.myScale ? "MY KEY" : "ORIG ~"}</div>
                   </div>
                 )}
-                <button onClick={e => { e.stopPropagation(); toggleSet(s.id); }} title="Add to setlist" style={{
+                <button onClick={e => { e.stopPropagation(); toggleSet(s.id); }} title={inSet(s.id) ? "Remove from setlist" : "Add to setlist"} style={{
                   background: inSet(s.id) ? T.violet + "33" : "transparent",
                   border: `1.5px solid ${inSet(s.id) ? T.violet : T.border}`,
                   color: inSet(s.id) ? T.violet : T.sub,
-                  borderRadius: 10, width: 36, height: 36, fontSize: 15, cursor: "pointer", flexShrink: 0,
+                  borderRadius: 11, width: 36, height: 36, fontSize: 15, cursor: "pointer", flexShrink: 0, transition: "all .15s",
                 }}>{inSet(s.id) ? "✓" : "＋"}</button>
               </div>
             );
