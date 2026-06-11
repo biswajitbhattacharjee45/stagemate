@@ -11,6 +11,24 @@
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script>
+  firebase.initializeApp({
+    apiKey: "AIzaSyArSsdXSj80uBe9ceitZIkcOCzn05--QT4",
+    authDomain: "stagemate-songs.firebaseapp.com",
+    projectId: "stagemate-songs",
+    storageBucket: "stagemate-songs.firebasestorage.app",
+    messagingSenderId: "197967460804",
+    appId: "1:197967460804:web:ae1f2dd5e23d2320d2cc91"
+  });
+  const _db = firebase.firestore();
+  // Offline persistence: writes survive app closure and re-send automatically
+  _db.enablePersistence({ synchronizeTabs: true }).catch(() => {});
+  window.__db = _db;
+  window.__auth = firebase.auth();
+</script>
 <style>
   * { -webkit-tap-highlight-color: transparent; }
   body { margin: 0; background: #0c0a14; font-family: 'DM Sans', sans-serif; }
@@ -305,6 +323,28 @@ function persistSongs(songs) {
 }
 
 /* ════════════════════════════════════════════════════════════
+   CLOUD SYNC — one Firestore document per song (collision-free),
+   offline persistence enabled, anonymous sign-in for security
+════════════════════════════════════════════════════════════ */
+const fsdb = window.__db || null;
+async function fsSaveSong(song) {
+  if (!fsdb) return;
+  try { await fsdb.collection("songs").doc(String(song.id)).set(song); } catch (e) { console.warn("sync:", e.message); }
+}
+async function fsDeleteSong(id) {
+  if (!fsdb) return;
+  try { await fsdb.collection("songs").doc(String(id)).delete(); } catch (e) {}
+}
+async function fsSaveSetlist(ids) {
+  if (!fsdb) return;
+  try { await fsdb.collection("config").doc("setlist").set({ ids }); } catch (e) {}
+}
+async function fsPushAll(songs) {
+  if (!fsdb) return;
+  try { await Promise.all(songs.map(s => fsdb.collection("songs").doc(String(s.id)).set(s))); } catch (e) {}
+}
+
+/* ════════════════════════════════════════════════════════════
    SMALL COMPONENTS
 ════════════════════════════════════════════════════════════ */
 const langMeta = {
@@ -571,14 +611,55 @@ function App() {
   const [showAdd, setShowAdd] = useState(false);
   const [setlist, setSetlist] = useState(() => { try { return JSON.parse(localStorage.getItem(LS_SET)) || []; } catch { return []; } });
   const [tab, setTab] = useState("songs"); // songs | setlist
+  const [sync, setSync] = useState(fsdb ? "connecting" : "local"); // connecting | synced | saving | local
+  const songsRef = useRef(songs);
+  useEffect(() => { songsRef.current = songs; }, [songs]);
   const searchRef = useRef(null);
+
+  // ── Cloud subscription: starts after anonymous sign-in succeeds ──
+  useEffect(() => {
+    if (!fsdb || !window.__auth) { setSync("local"); return; }
+    let unsubs = [];
+    let migrated = false;
+    const stopAuth = window.__auth.onAuthStateChanged(user => {
+      if (!user) return;
+      unsubs.push(fsdb.collection("songs").onSnapshot(snap => {
+        if (snap.empty && !migrated) {
+          // First run: this device's songs become the cloud copy
+          migrated = true;
+          setSync("saving");
+          fsPushAll(songsRef.current).then(() => setSync("synced"));
+          return;
+        }
+        if (!snap.empty) {
+          const arr = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+          setSongs(arr);
+          setSync(snap.metadata.hasPendingWrites ? "saving" : "synced");
+        }
+      }, () => setSync("local")));
+      unsubs.push(fsdb.collection("config").doc("setlist").onSnapshot(snap => {
+        if (snap.exists) { const d = snap.data(); if (Array.isArray(d.ids)) setSetlist(d.ids); }
+      }, () => {}));
+    });
+    window.__auth.signInAnonymously().catch(() => setSync("local"));
+    return () => { stopAuth(); unsubs.forEach(u => { try { u(); } catch {} }); };
+  }, []);
 
   useEffect(() => persistSongs(songs), [songs]);
   useEffect(() => { try { localStorage.setItem(LS_SET, JSON.stringify(setlist)); } catch {} }, [setlist]);
 
-  const saveSong = (s) => setSongs(prev => prev.map(x => x.id === s.id ? s : x));
-  const deleteSong = (id) => { setSongs(prev => prev.filter(x => x.id !== id)); setSetlist(prev => prev.filter(x => x !== id)); };
-  const addSong = (f) => setSongs(prev => [{ id: "u" + Date.now(), ...f, year: f.year ? parseInt(f.year) : "", startNote: "", taal: "", notes: "", lyrics: "", repertoire: true }, ...prev]);
+  const saveSong = (s) => { setSongs(prev => prev.map(x => x.id === s.id ? s : x)); fsSaveSong(s); };
+  const deleteSong = (id) => {
+    setSongs(prev => prev.filter(x => x.id !== id));
+    const newSet = setlist.filter(x => x !== id);
+    setSetlist(newSet);
+    fsDeleteSong(id); fsSaveSetlist(newSet);
+  };
+  const addSong = (f) => {
+    const obj = { id: "u" + Date.now(), ...f, year: f.year ? parseInt(f.year) : "", startNote: "", taal: "", notes: "", lyrics: "", repertoire: true };
+    setSongs(prev => [obj, ...prev]);
+    fsSaveSong(obj);
+  };
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -591,12 +672,13 @@ function App() {
   }, [songs, q, langF, repOnly]);
 
   const inSet = (id) => setlist.includes(id);
-  const toggleSet = (id) => setSetlist(prev => inSet(id) ? prev.filter(x => x !== id) : [...prev, id]);
-  const moveSet = (idx, dir) => setSetlist(prev => {
-    const arr = [...prev]; const j = idx + dir;
-    if (j < 0 || j >= arr.length) return arr;
-    [arr[idx], arr[j]] = [arr[j], arr[idx]]; return arr;
-  });
+  const toggleSet = (id) => { const arr = inSet(id) ? setlist.filter(x => x !== id) : [...setlist, id]; setSetlist(arr); fsSaveSetlist(arr); };
+  const moveSet = (idx, dir) => {
+    const arr = [...setlist]; const j = idx + dir;
+    if (j < 0 || j >= arr.length) return;
+    [arr[idx], arr[j]] = [arr[j], arr[idx]];
+    setSetlist(arr); fsSaveSetlist(arr);
+  };
 
   const exportData = () => {
     const blob = new Blob([JSON.stringify({ songs, setlist }, null, 2)], { type: "application/json" });
@@ -611,7 +693,7 @@ function App() {
     r.onload = () => {
       try {
         const d = JSON.parse(r.result);
-        if (Array.isArray(d.songs)) { setSongs(d.songs); if (Array.isArray(d.setlist)) setSetlist(d.setlist); alert("✅ Backup restored!"); }
+        if (Array.isArray(d.songs)) { setSongs(d.songs); if (Array.isArray(d.setlist)) { setSetlist(d.setlist); fsSaveSetlist(d.setlist); } fsPushAll(d.songs); alert("✅ Backup restored!"); }
         else alert("❌ Invalid backup file.");
       } catch { alert("❌ Could not read file."); }
     };
@@ -638,7 +720,12 @@ function App() {
             <div style={{ fontFamily: "'Fraunces', serif", fontSize: 30, fontWeight: 800, color: T.text, letterSpacing: -0.5 }}>
               Stage<span style={{ color: T.amber }}>Mate</span> <span style={{ fontSize: 18 }}>🎙️</span>
             </div>
-            <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Kishore Kumar Edition · {songs.length} songs · {counts.rep} in repertoire</div>
+            <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>
+              Kishore Kumar Edition · {songs.length} songs · {counts.rep} in repertoire
+              <span style={{ marginLeft: 8, fontWeight: 700, color: sync === "synced" ? T.green : sync === "saving" || sync === "connecting" ? T.amber : T.sub }}>
+                {sync === "synced" ? "☁️ Synced" : sync === "saving" ? "☁️ Saving…" : sync === "connecting" ? "☁️ Connecting…" : "📱 Local only"}
+              </span>
+            </div>
           </div>
           <div style={{ display: "flex", gap: 6 }}>
             <button onClick={exportData} title="Backup" style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, color: T.sub, padding: "8px 10px", fontSize: 14, cursor: "pointer" }}>⬇️</button>
@@ -745,7 +832,7 @@ function App() {
             );
           })}
           {setlist.length > 0 && (
-            <button onClick={() => { if (window.confirm("Clear the entire setlist?")) setSetlist([]); }} style={{ width: "100%", marginTop: 8, padding: 12, borderRadius: 12, cursor: "pointer", fontSize: 12, fontWeight: 700, background: "transparent", color: T.red, border: `1px solid ${T.red}44` }}>Clear Setlist</button>
+            <button onClick={() => { if (window.confirm("Clear the entire setlist?")) { setSetlist([]); fsSaveSetlist([]); } }} style={{ width: "100%", marginTop: 8, padding: 12, borderRadius: 12, cursor: "pointer", fontSize: 12, fontWeight: 700, background: "transparent", color: T.red, border: `1px solid ${T.red}44` }}>Clear Setlist</button>
           )}
         </div>
       )}
