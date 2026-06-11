@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>StageMate — Live Singing Companion</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,800&family=DM+Sans:wght@400;500;700&family=Noto+Sans+Devanagari:wght@400;500;700&family=Noto+Sans+Bengali:wght@400;500;700&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: #0c0a14; font-family: 'DM Sans', sans-serif; }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-thumb { background: #3a3450; border-radius: 4px; }
+  input, select, textarea, button { font-family: 'DM Sans', sans-serif; }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(12px);} to { opacity:1; transform:translateY(0);} }
+  @keyframes glow { 0%,100% { opacity:.5;} 50% { opacity:1;} }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+/* ════════════════════════════════════════════════════════════
+   THEME — stage-light aesthetic: deep indigo night + amber spot
+════════════════════════════════════════════════════════════ */
+const T = {
+  bg:      "#0c0a14",
+  panel:   "#16121f",
+  card:    "#1c1729",
+  card2:   "#241d35",
+  amber:   "#f5a524",
+  amber2:  "#ffd166",
+  violet:  "#9d7bff",
+  text:    "#f3eee4",
+  sub:     "#9a8fb8",
+  border:  "#2c2440",
+  green:   "#3ddc97",
+  red:     "#ff5470",
+  hindi:   "#f5a524",
+  bangla:  "#3ddc97",
+  rabindra:"#9d7bff",
+};
+
+/* ════════════════════════════════════════════════════════════
+   MUSIC THEORY — scales & auto-chords
+════════════════════════════════════════════════════════════ */
+const NOTES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+const noteIdx = (n) => NOTES.indexOf(n);
+const shift = (n, semis) => { const i = noteIdx(n); return i < 0 ? n : NOTES[(i + semis + 120) % 12]; };
+
+// Parse "C# minor" / "D" / "Gm" etc → {root, minor} or null
+function parseScale(s) {
+  if (!s) return null;
+  const m = String(s).trim().match(/^([A-Ga-g])(#|b)?\s*(m\b|min|minor)?/);
+  if (!m) return null;
+  let root = m[1].toUpperCase();
+  if (m[2] === "#") root += "#";
+  if (m[2] === "b") root = shift(root, -1); // flats → sharp equivalent
+  if (noteIdx(root) < 0) return null;
+  return { root, minor: !!m[3] };
+}
+function scaleLabel(p) { return p ? p.root + (p.minor ? " minor" : " major") : ""; }
+
+// Common chords for a key (factual music theory: I IV V vi ii / i iv v VI III VII)
+function chordsForScale(s) {
+  const p = parseScale(s);
+  if (!p) return [];
+  const { root, minor } = p;
+  if (!minor) {
+    return [
+      { ch: root,              tag: "I"  },
+      { ch: shift(root,5),     tag: "IV" },
+      { ch: shift(root,7),     tag: "V"  },
+      { ch: shift(root,9)+"m", tag: "vi" },
+      { ch: shift(root,2)+"m", tag: "ii" },
+    ];
+  }
+  return [
+    { ch: root+"m",          tag: "i"   },
+    { ch: shift(root,5)+"m", tag: "iv"  },
+    { ch: shift(root,7),     tag: "V"   },
+    { ch: shift(root,8),     tag: "VI"  },
+    { ch: shift(root,3),     tag: "III" },
+    { ch: shift(root,10),    tag: "VII" },
+  ];
+}
+function transposeScale(s, semis) {
+  const p = parseScale(s);
+  if (!p) return s;
+  return shift(p.root, semis) + (p.minor ? " minor" : "");
+}
+
+/* ════════════════════════════════════════════════════════════
+   LYRICS NORMALIZATION — uniform display regardless of source
+════════════════════════════════════════════════════════════ */
+// Detect dominant script: Hindi (Devanagari), Bangla (Bengali), or Latin
+function detectScript(t) {
+  if (!t) return "latin";
+  let dev = 0, ben = 0;
+  for (const ch of t) {
+    const c = ch.codePointAt(0);
+    if (c >= 0x0900 && c <= 0x097F) dev++;
+    else if (c >= 0x0980 && c <= 0x09FF) ben++;
+  }
+  if (ben > dev && ben > 5) return "bangla";
+  if (dev > ben && dev > 5) return "hindi";
+  return "latin";
+}
+const SCRIPT_FONT = {
+  latin:  "'DM Sans', sans-serif",
+  hindi:  "'Noto Sans Devanagari', 'DM Sans', sans-serif",
+  bangla: "'Noto Sans Bengali', 'DM Sans', sans-serif",
+};
+const SCRIPT_LABEL = { latin: "ABC English", hindi: "अ Hindi", bangla: "অ Bangla" };
+
+// Clean pasted text: removes site junk so every song looks identical in the app
+function cleanLyrics(t) {
+  if (!t) return t;
+  return t
+    .replace(/\r\n?/g, "\n")                 // windows/mac line endings → \n
+    .replace(/\u00a0/g, " ")                  // non-breaking spaces → normal
+    .replace(/[\u200b-\u200f\u202a-\u202e\ufeff]/g, "") // invisible/zero-width chars
+    .replace(/[“”]/g, '"').replace(/[‘’]/g, "'")        // smart quotes → plain
+    .split("\n").map(l => l.trim()).join("\n")           // trim each line
+    .replace(/[ \t]{2,}/g, " ")               // collapse multiple spaces
+    .replace(/\n{3,}/g, "\n\n")               // max one blank line between stanzas
+    .trim();
+}
+
+/* ════════════════════════════════════════════════════════════
+   SEED DATABASE — Kishore Kumar
+   Fields: title, source (film/album), year, lang (H/B/R),
+           md (music director), lyr (lyricist), scale (approx, editable)
+   NOTE: Scales are APPROXIMATE community-cited values where given —
+   verify on your harmonium and edit. Blank = set your own.
+════════════════════════════════════════════════════════════ */
+const SEED_VERSION = 1;
+const S = (title, source, year, lang, md, lyr, scale) => ({ title, source, year, lang, md, lyr, scale: scale||"" });
+
+const SEED = [
+/* ── HINDI — S.D. Burman era ── */
+S("Mere Sapno Ki Rani","Aradhana",1969,"H","S.D. Burman","Anand Bakshi","D"),
+S("Roop Tera Mastana","Aradhana",1969,"H","S.D. Burman","Anand Bakshi","C# minor"),
+S("Kora Kagaz Tha Yeh Man Mera (duet)","Aradhana",1969,"H","S.D. Burman","Anand Bakshi","D"),
+S("Phoolon Ke Rang Se","Prem Pujari",1970,"H","S.D. Burman","Neeraj","C#"),
+S("Shokhiyon Mein Ghola Jaye (duet)","Prem Pujari",1970,"H","S.D. Burman","Neeraj",""),
+S("Khilte Hain Gul Yahan","Sharmilee",1971,"H","S.D. Burman","Neeraj","D"),
+S("Aaj Madhosh Hua Jaye Re","Sharmilee",1971,"H","S.D. Burman","Neeraj",""),
+S("Yeh Dil Na Hota Bechara","Jewel Thief",1967,"H","S.D. Burman","Majrooh Sultanpuri","D"),
+S("Gaata Rahe Mera Dil (duet)","Guide",1965,"H","S.D. Burman","Shailendra","C#"),
+S("Meet Na Mila Re Mann Ka","Abhimaan",1973,"H","S.D. Burman","Majrooh Sultanpuri",""),
+S("Tere Mere Milan Ki Yeh Raina (duet)","Abhimaan",1973,"H","S.D. Burman","Majrooh Sultanpuri","D"),
+S("Dukhi Man Mere","Funtoosh",1956,"H","S.D. Burman","Sahir Ludhianvi","B minor"),
+S("Mana Janab Ne Pukara Nahin","Paying Guest",1957,"H","S.D. Burman","Majrooh Sultanpuri",""),
+S("Chhod Do Aanchal (duet)","Paying Guest",1957,"H","S.D. Burman","Majrooh Sultanpuri",""),
+S("Ek Ladki Bheegi Bhaagi Si","Chalti Ka Naam Gaadi",1958,"H","S.D. Burman","Majrooh Sultanpuri","D minor"),
+S("Haal Kaisa Hai Janab Ka (duet)","Chalti Ka Naam Gaadi",1958,"H","S.D. Burman","Majrooh Sultanpuri",""),
+S("Paanch Rupaiya Baara Aana","Chalti Ka Naam Gaadi",1958,"H","S.D. Burman","Majrooh Sultanpuri",""),
+S("Hum The Woh Thi (comic)","Chalti Ka Naam Gaadi",1958,"H","S.D. Burman","Majrooh Sultanpuri",""),
+
+/* ── HINDI — R.D. Burman era ── */
+S("Yeh Shaam Mastani","Kati Patang",1971,"H","R.D. Burman","Anand Bakshi","D"),
+S("Yeh Jo Mohabbat Hai","Kati Patang",1971,"H","R.D. Burman","Anand Bakshi","C# minor"),
+S("Pyar Deewana Hota Hai","Kati Patang",1971,"H","R.D. Burman","Anand Bakshi","D"),
+S("Chingari Koi Bhadke","Amar Prem",1972,"H","R.D. Burman","Anand Bakshi","E minor"),
+S("Kuch To Log Kahenge","Amar Prem",1972,"H","R.D. Burman","Anand Bakshi","D# minor"),
+S("Yeh Kya Hua","Amar Prem",1972,"H","R.D. Burman","Anand Bakshi","D"),
+S("O Mere Dil Ke Chain","Mere Jeevan Saathi",1972,"H","R.D. Burman","Majrooh Sultanpuri","E"),
+S("Chala Jata Hoon","Mere Jeevan Saathi",1972,"H","R.D. Burman","Majrooh Sultanpuri","A minor"),
+S("Musafir Hoon Yaaron","Parichay",1972,"H","R.D. Burman","Gulzar","D"),
+S("Raat Kali Ek Khwab Mein","Buddha Mil Gaya",1971,"H","R.D. Burman","Majrooh Sultanpuri","C#"),
+S("Tere Bina Zindagi Se (duet)","Aandhi",1975,"H","R.D. Burman","Gulzar","C# minor"),
+S("Tum Aa Gaye Ho (duet)","Aandhi",1975,"H","R.D. Burman","Gulzar","D"),
+S("Mere Naina Sawan Bhadon","Mehbooba",1976,"H","R.D. Burman","Anand Bakshi","C# minor"),
+S("Zindagi Ke Safar Mein","Aap Ki Kasam",1974,"H","R.D. Burman","Anand Bakshi","C# minor"),
+S("Karvaten Badalte Rahe (duet)","Aap Ki Kasam",1974,"H","R.D. Burman","Anand Bakshi",""),
+S("Jai Jai Shiv Shankar (duet)","Aap Ki Kasam",1974,"H","R.D. Burman","Anand Bakshi",""),
+S("Diye Jalte Hain","Namak Haraam",1973,"H","R.D. Burman","Anand Bakshi","D"),
+S("Ek Ajnabee Haseena Se","Ajanabee",1974,"H","R.D. Burman","Anand Bakshi","D"),
+S("Hum Dono Do Premi (duet)","Ajanabee",1974,"H","R.D. Burman","Anand Bakshi",""),
+S("O Hansini","Zehreela Insaan",1974,"H","R.D. Burman","Majrooh Sultanpuri","C# minor"),
+S("Yeh Dosti (duet w/ Manna Dey)","Sholay",1975,"H","R.D. Burman","Anand Bakshi","E"),
+S("Koi Haseena Jab Rooth Jaati Hai","Sholay",1975,"H","R.D. Burman","Anand Bakshi",""),
+S("Bachna Ae Haseeno","Hum Kisise Kum Naheen",1977,"H","R.D. Burman","Majrooh Sultanpuri","D minor"),
+S("Aanewala Pal Jaanewala Hai","Golmaal",1979,"H","R.D. Burman","Gulzar","D"),
+S("Aap Ki Aankhon Mein Kuch (duet)","Ghar",1978,"H","R.D. Burman","Gulzar","C#"),
+S("Hum Bewafa Hargiz Na The","Shalimar",1978,"H","R.D. Burman","Anand Bakshi","A minor"),
+S("Rimjhim Gire Sawan","Manzil",1979,"H","R.D. Burman","Yogesh","C# minor"),
+S("Hamein Tumse Pyar Kitna","Kudrat",1981,"H","R.D. Burman","Majrooh Sultanpuri","C# minor"),
+S("Dilbar Mere Kab Tak Mujhe","Satte Pe Satta",1982,"H","R.D. Burman","Gulshan Bawra","D"),
+S("Pyaar Hamen Kis Mod Pe (group)","Satte Pe Satta",1982,"H","R.D. Burman","Gulshan Bawra",""),
+S("Agar Tum Na Hote","Agar Tum Na Hote",1983,"H","R.D. Burman","Gulshan Bawra","D"),
+S("Humen Aur Jeene Ki","Agar Tum Na Hote",1983,"H","R.D. Burman","Gulshan Bawra",""),
+S("Saagar Kinare (duet)","Saagar",1985,"H","R.D. Burman","Javed Akhtar","C#"),
+S("Mere Saamne Wali Khidki Mein","Padosan",1968,"H","R.D. Burman","Rajinder Krishan","D"),
+S("Ek Chatur Naar (duet w/ Manna Dey)","Padosan",1968,"H","R.D. Burman","Rajinder Krishan",""),
+S("Kehna Hai Kehna Hai","Padosan",1968,"H","R.D. Burman","Rajinder Krishan","C#"),
+S("Tum Bin Jaoon Kahan","Pyar Ka Mausam",1969,"H","R.D. Burman","Majrooh Sultanpuri","D"),
+S("Tera Mujhse Hai Pehle Ka Naata Koi","Aa Gale Lag Jaa",1973,"H","R.D. Burman","Sahir Ludhianvi","D"),
+S("Wada Karo (duet)","Aa Gale Lag Jaa",1973,"H","R.D. Burman","Sahir Ludhianvi",""),
+S("Apne Pyar Ke Sapne (duet)","Barsaat Ki Ek Raat",1981,"H","R.D. Burman","Anand Bakshi",""),
+S("Jab Bhi Koi Kangana Bole","Shaukeen",1982,"H","R.D. Burman","Yogesh",""),
+
+/* ── HINDI — Kalyanji-Anandji / S-J / L-P / others ── */
+S("Zindagi Ka Safar","Safar",1970,"H","Kalyanji-Anandji","Indeevar","C# minor"),
+S("Jeevan Se Bhari Teri Aankhen","Safar",1970,"H","Kalyanji-Anandji","Indeevar","D"),
+S("Pal Bhar Ke Liye","Johny Mera Naam",1970,"H","Kalyanji-Anandji","Indeevar","D"),
+S("O Mere Raja (duet)","Johny Mera Naam",1970,"H","Kalyanji-Anandji","Indeevar",""),
+S("Zindagi Ek Safar Hai Suhana","Andaz",1971,"H","Shankar-Jaikishan","Hasrat Jaipuri","D"),
+S("Bhanwre Ki Gunjan","Kal Aaj Aur Kal",1971,"H","Shankar-Jaikishan","Hasrat Jaipuri","C# minor"),
+S("Mera Jeevan Kora Kagaz","Kora Kagaz",1974,"H","Kalyanji-Anandji","M.G. Hashmat","C minor"),
+S("Pal Pal Dil Ke Paas","Blackmail",1973,"H","Kalyanji-Anandji","Rajinder Krishan","C#"),
+S("O Saathi Re Tere Bina","Muqaddar Ka Sikandar",1978,"H","Kalyanji-Anandji","Anjaan","D"),
+S("Rote Hue Aate Hain Sab","Muqaddar Ka Sikandar",1978,"H","Kalyanji-Anandji","Anjaan","D minor"),
+S("Salaam-e-Ishq (duet)","Muqaddar Ka Sikandar",1978,"H","Kalyanji-Anandji","Anjaan",""),
+S("Khaike Paan Banaraswala","Don",1978,"H","Kalyanji-Anandji","Anjaan","D"),
+S("Neele Neele Ambar Par","Kalaakaar",1983,"H","Kalyanji-Anandji","Indeevar","D"),
+S("Mere Mehboob Qayamat Hogi","Mr. X in Bombay",1964,"H","Laxmikant-Pyarelal","Anand Bakshi","C minor"),
+S("Mere Dil Mein Aaj Kya Hai","Daag",1973,"H","Laxmikant-Pyarelal","Sahir Ludhianvi","D"),
+S("Gaadi Bula Rahi Hai","Dost",1974,"H","Laxmikant-Pyarelal","Anand Bakshi","D"),
+S("Ruk Jaana Nahin","Imtihan",1974,"H","Laxmikant-Pyarelal","Majrooh Sultanpuri","D"),
+S("Yeh Jeevan Hai","Piya Ka Ghar",1972,"H","Laxmikant-Pyarelal","Anand Bakshi","D"),
+S("Aate Jaate Khoobsurat Awara","Anurodh",1977,"H","Laxmikant-Pyarelal","Anand Bakshi","C#"),
+S("Aap Ke Anurodh Pe","Anurodh",1977,"H","Laxmikant-Pyarelal","Anand Bakshi",""),
+S("Mere Naseeb Mein (solo ver.)","Naseeb",1981,"H","Laxmikant-Pyarelal","Anand Bakshi",""),
+S("Om Shanti Om","Karz",1980,"H","Laxmikant-Pyarelal","Anand Bakshi","C# minor"),
+S("Dil Aisa Kisi Ne Mera Toda","Amanush",1975,"H","Shyamal Mitra","Indeevar","C#"),
+S("Koi Hota Jisko Apna","Mere Apne",1971,"H","Salil Chowdhury","Gulzar","D minor"),
+S("Maine Tere Liye Hi","Anand",1971,"H","Salil Chowdhury","Gulzar","D"),
+S("Aake Seedhi Lagi Dil Pe","Half Ticket",1962,"H","Salil Chowdhury","Shailendra",""),
+S("Cheel Cheel Chillake","Half Ticket",1962,"H","Salil Chowdhury","Shailendra",""),
+S("Hawaon Pe Likh Do","Do Dooni Char",1968,"H","Hemant Kumar","Gulzar","C#"),
+S("Chhookar Mere Man Ko","Yaarana",1981,"H","Rajesh Roshan","Anjaan","C#"),
+S("Dil Kya Kare Jab Kisi Ko","Julie",1975,"H","Rajesh Roshan","Anand Bakshi","C# minor"),
+S("Bhool Gaya Sab Kuchh (duet)","Julie",1975,"H","Rajesh Roshan","Anand Bakshi",""),
+S("Kabhi Alvida Naa Kehna (duet)","Chalte Chalte",1976,"H","Bappi Lahiri","Amit Khanna","C minor"),
+S("Chalte Chalte Mere Yeh Geet","Chalte Chalte",1976,"H","Bappi Lahiri","Amit Khanna","D"),
+S("Pag Ghungroo Baandh","Namak Halaal",1982,"H","Bappi Lahiri","Anjaan","D"),
+S("Manzilein Apni Jagah Hain","Sharaabi",1984,"H","Bappi Lahiri","Anjaan","C# minor"),
+S("Inteha Ho Gayi Intezar Ki","Sharaabi",1984,"H","Bappi Lahiri","Anjaan","D"),
+S("De De Pyar De","Sharaabi",1984,"H","Bappi Lahiri","Anjaan","D"),
+S("Log Kehte Hain Main Sharabi Hoon","Sharaabi",1984,"H","Bappi Lahiri","Anjaan",""),
+S("Zindagi Aa Raha Hoon Main","Mashaal",1984,"H","Hridaynath Mangeshkar","Javed Akhtar","D minor"),
+S("Zindagi Pyar Ka Geet Hai (solo ver.)","Souten",1983,"H","Usha Khanna","Saawan Kumar","D"),
+S("Maana Ho Tum Behad Haseen","Toote Khilone",1978,"H","Naushad","Kaifi Azmi","C#"),
+S("Mere Mehboob Mere Sanam... (Yeh Vaada Raha duet)","Yeh Vaada Raha",1982,"H","R.D. Burman","Gulshan Bawra",""),
+
+/* ── BANGLA — Film ── */
+S("Shing Nei Tobu Naam Tar Singho","Lukochuri",1958,"B","Hemanta Mukherjee","Gauriprasanna Mazumder",""),
+S("Ek Poloker Ektu Dekha","Lukochuri",1958,"B","Hemanta Mukherjee","Gauriprasanna Mazumder","C#"),
+S("Chirodini Tumi Je Amar","Amar Sangee",1987,"B","Bappi Lahiri","Pulak Bandyopadhyay","D"),
+S("Phoole Gondho Nei","Gurudakshina",1987,"B","Bappi Lahiri","Pulak Bandyopadhyay",""),
+S("Bipin Babur Karon Sudha","Amanush",1975,"B","Shyamal Mitra","Gauriprasanna Mazumder",""),
+
+/* ── BANGLA — Adhunik (non-film) ── */
+S("Amar Pujar Phool","Adhunik",1976,"B","Kishore Kumar","Mukul Dutt","D"),
+S("Akash Keno Dake","Adhunik",1976,"B","Kishore Kumar","Mukul Dutt","C# minor"),
+S("Nayano Sarasi Keno","Adhunik",1979,"B","Kishore Kumar","Mukul Dutt","C#"),
+S("Ekdin Pakhi Ure Jabe Je Akashe","Adhunik",1980,"B","Kishore Kumar","Mukul Dutt","C# minor"),
+S("Amar Deep Nebhano Raat","Adhunik",1980,"B","Kishore Kumar","Mukul Dutt","C minor"),
+S("Tumi Koto Je Dure","Adhunik",1978,"B","Kishore Kumar","Mukul Dutt","C# minor"),
+S("Hoyto Amake Karo Mone Nei","Adhunik",1982,"B","Kishore Kumar","Mukul Dutt",""),
+S("Amay Ektu Jayga Dao","Adhunik (Shyama Sangeet)",1981,"B","Kishore Kumar","Mukul Dutt","D minor"),
+S("Jodi Hoi Chorkanta","Adhunik",1977,"B","Kishore Kumar","Mukul Dutt",""),
+S("Sei Raate Raat Chhilo Purnima","Adhunik",1979,"B","Kishore Kumar","Mukul Dutt",""),
+S("Aaj Ei Dintake Moner Khatay","Adhunik",1978,"B","Kishore Kumar","Mukul Dutt","D"),
+S("Ki Upohar Sajiye Debo","Adhunik",1980,"B","Kishore Kumar","Mukul Dutt",""),
+S("Ogo Nirupoma","Adhunik",1981,"B","Kishore Kumar","Mukul Dutt",""),
+
+/* ── RABINDRA SANGEET (sung by Kishore) ── */
+S("Ami Chini Go Chini Tomare","Charulata (film)",1964,"R","Rabindranath Tagore","Rabindranath Tagore","C#"),
+];
+
+/* ════════════════════════════════════════════════════════════
+   STORAGE
+════════════════════════════════════════════════════════════ */
+const LS_KEY = "stagemate_songs_v1";
+const LS_SET = "stagemate_setlist_v1";
+function loadSongs() {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (raw) {
+      const data = JSON.parse(raw);
+      if (Array.isArray(data.songs)) return data.songs;
+    }
+  } catch {}
+  // first run → seed
+  const seeded = SEED.map((s, i) => ({
+    id: "s" + i,
+    ...s,
+    myScale: "", startNote: "", taal: "", notes: "", lyrics: "",
+    repertoire: false,
+  }));
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ v: SEED_VERSION, songs: seeded })); } catch {}
+  return seeded;
+}
+function persistSongs(songs) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ v: SEED_VERSION, songs })); } catch {}
+}
+
+/* ════════════════════════════════════════════════════════════
+   SMALL COMPONENTS
+════════════════════════════════════════════════════════════ */
+const langMeta = {
+  H: { label: "Hindi",    color: T.hindi },
+  B: { label: "Bangla",   color: T.bangla },
+  R: { label: "Rabindra", color: T.rabindra },
+};
+
+const Chip = ({ children, color, onClick, active }) => (
+  <button onClick={onClick} style={{
+    background: active ? color + "33" : T.card2,
+    border: `1.5px solid ${active ? color : T.border}`,
+    color: active ? color : T.sub,
+    borderRadius: 20, padding: "6px 14px", fontSize: 12, fontWeight: 700,
+    cursor: "pointer", whiteSpace: "nowrap",
+  }}>{children}</button>
+);
+
+const Field = ({ label, value, onChange, placeholder, type }) => (
+  <div style={{ marginBottom: 12 }}>
+    <label style={{ fontSize: 10, color: T.sub, letterSpacing: 1.2, fontWeight: 700, textTransform: "uppercase" }}>{label}</label>
+    <input type={type||"text"} value={value||""} onChange={e => onChange(e.target.value)} placeholder={placeholder||""}
+      style={{ display: "block", width: "100%", marginTop: 4, padding: "10px 12px",
+        background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10,
+        color: T.text, fontSize: 14, boxSizing: "border-box", outline: "none" }} />
+  </div>
+);
+
+const ChordChips = ({ scale }) => {
+  const chords = chordsForScale(scale);
+  if (!chords.length) return <span style={{ fontSize: 12, color: T.sub }}>Set a scale to see chords</span>;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {chords.map(c => (
+        <div key={c.tag} style={{ background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, padding: "6px 12px", textAlign: "center" }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.amber2, fontFamily: "'Fraunces', serif" }}>{c.ch}</div>
+          <div style={{ fontSize: 9, color: T.sub, letterSpacing: 1 }}>{c.tag}</div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/* ════════════════════════════════════════════════════════════
+   SONG DETAIL — full screen panel (stage friendly)
+════════════════════════════════════════════════════════════ */
+function SongDetail({ song, onClose, onSave, onDelete }) {
+  const [s, setS] = useState({ ...song });
+  const [edit, setEdit] = useState(false);
+  const [transpose, setTranspose] = useState(0);
+  const [stageView, setStageView] = useState(false);
+  const [lyricSize, setLyricSize] = useState(22);
+  const set = (k) => (v) => setS(prev => ({ ...prev, [k]: v }));
+  const meta = langMeta[s.lang] || langMeta.H;
+
+  const baseScale = s.myScale || s.scale;
+  const shownScale = transpose === 0 ? baseScale : transposeScale(baseScale, transpose);
+
+  const lyricsUrl = "https://www.google.com/search?q=" + encodeURIComponent(`${s.title} ${s.source !== "Adhunik" ? s.source : ""} lyrics`);
+  const listenUrl = "https://www.youtube.com/results?search_query=" + encodeURIComponent(`${s.title} Kishore Kumar`);
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 200, background: T.bg, overflowY: "auto", animation: "fadeUp .25s ease" }}>
+      {/* ── STAGE VIEW: full-screen big-text display of user's own lyrics ── */}
+      {stageView && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#050308", display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: `1px solid ${T.border}`, flexShrink: 0 }}>
+            <button onClick={() => setStageView(false)} style={{ background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, color: T.text, padding: "8px 14px", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>✕</button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: "'Fraunces', serif", fontSize: 15, fontWeight: 800, color: T.amber2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.title}</div>
+              <div style={{ fontSize: 10, color: T.sub }}>{(s.myScale || s.scale) ? `Scale: ${s.myScale || s.scale}` : ""}{s.startNote ? `  ·  Start: ${s.startNote}` : ""}</div>
+            </div>
+            <button onClick={() => setLyricSize(z => Math.max(14, z - 2))} style={{ background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, color: T.text, width: 38, height: 38, fontSize: 14, cursor: "pointer", fontWeight: 800 }}>A−</button>
+            <button onClick={() => setLyricSize(z => Math.min(40, z + 2))} style={{ background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, color: T.text, width: 38, height: 38, fontSize: 17, cursor: "pointer", fontWeight: 800 }}>A+</button>
+          </div>
+          <div style={{ flex: 1, overflowY: "auto", padding: "22px 20px 80px" }}>
+            <div style={{ maxWidth: 620, margin: "0 auto", whiteSpace: "pre-wrap", color: T.text, fontSize: lyricSize, lineHeight: 1.9, fontWeight: 500, fontFamily: SCRIPT_FONT[detectScript(s.lyrics)] }}>
+              {cleanLyrics(s.lyrics)}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div style={{ position: "sticky", top: 0, background: T.panel + "f5", backdropFilter: "blur(8px)", borderBottom: `1px solid ${T.border}`, padding: "14px 18px", display: "flex", alignItems: "center", gap: 12, zIndex: 5 }}>
+        <button onClick={onClose} style={{ background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, color: T.text, padding: "8px 14px", fontSize: 14, cursor: "pointer", fontWeight: 700 }}>←</button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 17, fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.title}</div>
+          <div style={{ fontSize: 11, color: meta.color, fontWeight: 700 }}>{meta.label} · {s.source}{s.year ? ` (${s.year})` : ""}</div>
+        </div>
+        <button onClick={() => setEdit(e => !e)} style={{ background: edit ? T.amber : T.card2, border: `1px solid ${edit ? T.amber : T.border}`, borderRadius: 10, color: edit ? "#1a1207" : T.text, padding: "8px 14px", fontSize: 12, cursor: "pointer", fontWeight: 800 }}>{edit ? "Done" : "✏️ Edit"}</button>
+      </div>
+
+      <div style={{ maxWidth: 640, margin: "0 auto", padding: "20px 18px 60px" }}>
+
+        {/* Quick action buttons */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 20 }}>
+          <a href={lyricsUrl} target="_blank" rel="noopener" style={{ textDecoration: "none", background: `linear-gradient(135deg, ${T.amber}, #e8842a)`, borderRadius: 14, padding: "16px 12px", textAlign: "center", color: "#1a1207", fontWeight: 800, fontSize: 15 }}>📜 Lyrics</a>
+          <a href={listenUrl} target="_blank" rel="noopener" style={{ textDecoration: "none", background: T.card, border: `1.5px solid ${T.border}`, borderRadius: 14, padding: "16px 12px", textAlign: "center", color: T.text, fontWeight: 800, fontSize: 15 }}>▶️ Listen</a>
+        </div>
+
+        {/* Credits card */}
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 16, padding: 18, marginBottom: 16 }}>
+          <div style={{ fontSize: 10, color: T.sub, letterSpacing: 1.5, fontWeight: 800, marginBottom: 12 }}>CREDITS</div>
+          {edit ? (
+            <React.Fragment>
+              <Field label="Song Title" value={s.title} onChange={set("title")} />
+              <Field label="Film / Album" value={s.source} onChange={set("source")} />
+              <Field label="Year" value={s.year} onChange={set("year")} type="number" />
+              <Field label="Music Director" value={s.md} onChange={set("md")} />
+              <Field label="Lyricist" value={s.lyr} onChange={set("lyr")} />
+            </React.Fragment>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", rowGap: 10, columnGap: 16, fontSize: 14 }}>
+              <span style={{ color: T.sub }}>🎤 Singer</span><span style={{ color: T.text, fontWeight: 600 }}>Kishore Kumar</span>
+              <span style={{ color: T.sub }}>🎬 {s.source === "Adhunik" || (s.source||"").startsWith("Adhunik") ? "Album" : "Film"}</span><span style={{ color: T.text, fontWeight: 600 }}>{s.source} {s.year ? `(${s.year})` : ""}</span>
+              <span style={{ color: T.sub }}>🎼 Music</span><span style={{ color: T.text, fontWeight: 600 }}>{s.md || "—"}</span>
+              <span style={{ color: T.sub }}>✍️ Lyrics</span><span style={{ color: T.text, fontWeight: 600 }}>{s.lyr || "—"}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Scale & chords card */}
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 16, padding: 18, marginBottom: 16 }}>
+          <div style={{ fontSize: 10, color: T.sub, letterSpacing: 1.5, fontWeight: 800, marginBottom: 12 }}>SCALE & CHORDS</div>
+          {edit ? (
+            <React.Fragment>
+              <Field label="Original Scale (approx)" value={s.scale} onChange={set("scale")} placeholder="e.g. C# minor / D" />
+              <Field label="My Comfortable Scale" value={s.myScale} onChange={set("myScale")} placeholder="Your singing scale" />
+              <Field label="Starting Note (sa/pa…)" value={s.startNote} onChange={set("startNote")} placeholder="e.g. starts on Pa" />
+              <Field label="Taal / Rhythm" value={s.taal} onChange={set("taal")} placeholder="e.g. Kaherwa, Dadra" />
+            </React.Fragment>
+          ) : (
+            <React.Fragment>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+                <div style={{ flex: 1, minWidth: 130, background: T.card2, borderRadius: 12, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 9, color: T.sub, letterSpacing: 1, marginBottom: 3 }}>ORIGINAL ~</div>
+                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 800, color: T.text }}>{s.scale ? scaleLabel(parseScale(s.scale)) || s.scale : "—"}</div>
+                </div>
+                <div style={{ flex: 1, minWidth: 130, background: s.myScale ? T.amber + "1a" : T.card2, border: s.myScale ? `1px solid ${T.amber}55` : "none", borderRadius: 12, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 9, color: s.myScale ? T.amber : T.sub, letterSpacing: 1, marginBottom: 3 }}>MY SCALE</div>
+                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 800, color: s.myScale ? T.amber2 : T.sub }}>{s.myScale ? scaleLabel(parseScale(s.myScale)) || s.myScale : "tap ✏️ to set"}</div>
+                </div>
+              </div>
+              {(s.startNote || s.taal) && (
+                <div style={{ fontSize: 13, color: T.sub, marginBottom: 14 }}>
+                  {s.startNote && <span>🎯 Start: <b style={{ color: T.text }}>{s.startNote}</b>　</span>}
+                  {s.taal && <span>🥁 Taal: <b style={{ color: T.text }}>{s.taal}</b></span>}
+                </div>
+              )}
+              {/* Transpose */}
+              {baseScale && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, background: T.card2, borderRadius: 12, padding: "10px 14px" }}>
+                  <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>TRANSPOSE</span>
+                  <button onClick={() => setTranspose(t => t - 1)} style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, color: T.text, width: 34, height: 34, fontSize: 18, cursor: "pointer", fontWeight: 800 }}>−</button>
+                  <div style={{ flex: 1, textAlign: "center" }}>
+                    <div style={{ fontFamily: "'Fraunces', serif", fontSize: 18, fontWeight: 800, color: transpose === 0 ? T.text : T.amber2 }}>{scaleLabel(parseScale(shownScale)) || shownScale}</div>
+                    <div style={{ fontSize: 10, color: T.sub }}>{transpose === 0 ? "as set" : (transpose > 0 ? "+" : "") + transpose + " semitones"}</div>
+                  </div>
+                  <button onClick={() => setTranspose(t => t + 1)} style={{ background: T.panel, border: `1px solid ${T.border}`, borderRadius: 8, color: T.text, width: 34, height: 34, fontSize: 18, cursor: "pointer", fontWeight: 800 }}>+</button>
+                </div>
+              )}
+              <ChordChips scale={shownScale} />
+            </React.Fragment>
+          )}
+        </div>
+
+        {/* My lyrics (user-entered) */}
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 16, padding: 18, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ fontSize: 10, color: T.sub, letterSpacing: 1.5, fontWeight: 800 }}>MY LYRICS</div>
+              {(s.lyrics||"").trim() && (
+                <span style={{ fontSize: 10, background: T.card2, border: `1px solid ${T.border}`, color: T.amber2, borderRadius: 20, padding: "2px 10px", fontWeight: 700 }}>{SCRIPT_LABEL[detectScript(s.lyrics)]}</span>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {(s.lyrics||"").trim() && (
+                <button onClick={() => set("lyrics")(cleanLyrics(s.lyrics))} title="Remove extra spaces, blank lines and junk from the pasted text" style={{ background: T.amber + "22", border: `1.5px solid ${T.amber}`, color: T.amber2, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>✨ Uniform Format</button>
+              )}
+              {(s.lyrics||"").trim() && (
+                <button onClick={() => setStageView(true)} style={{ background: T.violet + "22", border: `1.5px solid ${T.violet}`, color: T.violet, borderRadius: 10, padding: "6px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>🎤 Stage View</button>
+              )}
+            </div>
+          </div>
+          <textarea value={s.lyrics||""} onChange={e => set("lyrics")(e.target.value)}
+            onPaste={() => setTimeout(() => setS(prev => ({ ...prev, lyrics: cleanLyrics(prev.lyrics) })), 50)}
+            placeholder="Paste the lyrics here from any site — the app automatically removes extra lines, odd spacing and invisible junk, and displays everything in one uniform style. Works with English, Hindi (देवनागरी) and Bangla (বাংলা) scripts."
+            style={{ width: "100%", minHeight: 120, background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, color: T.text, fontSize: 15, padding: "12px 14px", boxSizing: "border-box", outline: "none", resize: "vertical", lineHeight: 1.8, fontFamily: SCRIPT_FONT[detectScript(s.lyrics)] }} />
+          {!(s.lyrics||"").trim() && (
+            <div style={{ fontSize: 11, color: T.sub, marginTop: 8 }}>Tip: tap 📜 Lyrics above to open them, copy, and paste here once. Remember to 💾 Save.</div>
+          )}
+        </div>
+
+        {/* Personal notes */}
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 16, padding: 18, marginBottom: 16 }}>
+          <div style={{ fontSize: 10, color: T.sub, letterSpacing: 1.5, fontWeight: 800, marginBottom: 10 }}>MY PERFORMANCE NOTES</div>
+          <textarea value={s.notes||""} onChange={e => set("notes")(e.target.value)}
+            placeholder="Your private reminders — opening line cue, tricky words, where to take breath, audience tips…"
+            style={{ width: "100%", minHeight: 90, background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, color: T.text, fontSize: 14, padding: "10px 12px", boxSizing: "border-box", outline: "none", resize: "vertical", lineHeight: 1.6 }} />
+        </div>
+
+        {/* Repertoire toggle + save */}
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={() => set("repertoire")(!s.repertoire)} style={{
+            flex: 1, padding: 14, borderRadius: 14, cursor: "pointer", fontWeight: 800, fontSize: 14,
+            background: s.repertoire ? T.green + "22" : T.card, color: s.repertoire ? T.green : T.sub,
+            border: `1.5px solid ${s.repertoire ? T.green : T.border}`,
+          }}>{s.repertoire ? "⭐ In My Repertoire" : "☆ Add to Repertoire"}</button>
+          <button onClick={() => { onSave({ ...s, lyrics: cleanLyrics(s.lyrics||"") }); onClose(); }} style={{
+            flex: 1, padding: 14, borderRadius: 14, cursor: "pointer", fontWeight: 800, fontSize: 14,
+            background: `linear-gradient(135deg, ${T.amber}, #e8842a)`, color: "#1a1207", border: "none",
+          }}>💾 Save</button>
+        </div>
+        <button onClick={() => { if (window.confirm("Delete this song from your database?")) { onDelete(s.id); onClose(); } }}
+          style={{ width: "100%", marginTop: 12, padding: 12, borderRadius: 12, cursor: "pointer", fontSize: 12, fontWeight: 700, background: "transparent", color: T.red, border: `1px solid ${T.red}44` }}>🗑️ Delete Song</button>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════
+   ADD SONG
+════════════════════════════════════════════════════════════ */
+function AddSong({ onAdd, onClose }) {
+  const [f, setF] = useState({ title: "", source: "", year: "", lang: "H", md: "", lyr: "", scale: "", myScale: "" });
+  const set = (k) => (v) => setF(p => ({ ...p, [k]: v }));
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 200, background: T.bg + "f2", display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", maxWidth: 560, background: T.panel, borderRadius: "24px 24px 0 0", padding: "24px 20px 36px", maxHeight: "88vh", overflowY: "auto", border: `1px solid ${T.border}`, animation: "fadeUp .25s ease" }}>
+        <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 800, color: T.text, marginBottom: 16 }}>＋ Add a Song</div>
+        <Field label="Song Title *" value={f.title} onChange={set("title")} placeholder="Song name" />
+        <Field label="Film / Album" value={f.source} onChange={set("source")} placeholder="e.g. Aradhana / Adhunik" />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Year" value={f.year} onChange={set("year")} type="number" />
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 10, color: T.sub, letterSpacing: 1.2, fontWeight: 700 }}>LANGUAGE</label>
+            <select value={f.lang} onChange={e => set("lang")(e.target.value)} style={{ display: "block", width: "100%", marginTop: 4, padding: "10px 12px", background: T.card2, border: `1px solid ${T.border}`, borderRadius: 10, color: T.text, fontSize: 14, outline: "none" }}>
+              <option value="H">Hindi</option><option value="B">Bangla</option><option value="R">Rabindra Sangeet</option>
+            </select>
+          </div>
+        </div>
+        <Field label="Music Director" value={f.md} onChange={set("md")} />
+        <Field label="Lyricist" value={f.lyr} onChange={set("lyr")} />
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <Field label="Original Scale" value={f.scale} onChange={set("scale")} placeholder="e.g. C# minor" />
+          <Field label="My Scale" value={f.myScale} onChange={set("myScale")} placeholder="e.g. B minor" />
+        </div>
+        <button disabled={!f.title.trim()} onClick={() => { onAdd(f); onClose(); }} style={{ width: "100%", padding: 14, marginTop: 8, borderRadius: 14, cursor: "pointer", fontWeight: 800, fontSize: 15, background: f.title.trim() ? `linear-gradient(135deg, ${T.amber}, #e8842a)` : T.card2, color: f.title.trim() ? "#1a1207" : T.sub, border: "none" }}>Add Song</button>
+      </div>
+    </div>
+  );
+}
+
+/* ════════════════════════════════════════════════════════════
+   MAIN APP
+════════════════════════════════════════════════════════════ */
+function App() {
+  const [songs, setSongs] = useState(loadSongs);
+  const [q, setQ] = useState("");
+  const [langF, setLangF] = useState("ALL");
+  const [repOnly, setRepOnly] = useState(false);
+  const [openSong, setOpenSong] = useState(null);
+  const [showAdd, setShowAdd] = useState(false);
+  const [setlist, setSetlist] = useState(() => { try { return JSON.parse(localStorage.getItem(LS_SET)) || []; } catch { return []; } });
+  const [tab, setTab] = useState("songs"); // songs | setlist
+  const searchRef = useRef(null);
+
+  useEffect(() => persistSongs(songs), [songs]);
+  useEffect(() => { try { localStorage.setItem(LS_SET, JSON.stringify(setlist)); } catch {} }, [setlist]);
+
+  const saveSong = (s) => setSongs(prev => prev.map(x => x.id === s.id ? s : x));
+  const deleteSong = (id) => { setSongs(prev => prev.filter(x => x.id !== id)); setSetlist(prev => prev.filter(x => x !== id)); };
+  const addSong = (f) => setSongs(prev => [{ id: "u" + Date.now(), ...f, year: f.year ? parseInt(f.year) : "", startNote: "", taal: "", notes: "", lyrics: "", repertoire: true }, ...prev]);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return songs.filter(s => {
+      if (langF !== "ALL" && s.lang !== langF) return false;
+      if (repOnly && !s.repertoire) return false;
+      if (!needle) return true;
+      return (s.title + " " + s.source + " " + (s.md||"") + " " + (s.lyr||"")).toLowerCase().includes(needle);
+    }).sort((a,b) => a.title.localeCompare(b.title));
+  }, [songs, q, langF, repOnly]);
+
+  const inSet = (id) => setlist.includes(id);
+  const toggleSet = (id) => setSetlist(prev => inSet(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const moveSet = (idx, dir) => setSetlist(prev => {
+    const arr = [...prev]; const j = idx + dir;
+    if (j < 0 || j >= arr.length) return arr;
+    [arr[idx], arr[j]] = [arr[j], arr[idx]]; return arr;
+  });
+
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify({ songs, setlist }, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "stagemate_backup_" + new Date().toISOString().slice(0,10) + ".json";
+    a.click();
+  };
+  const importData = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const d = JSON.parse(r.result);
+        if (Array.isArray(d.songs)) { setSongs(d.songs); if (Array.isArray(d.setlist)) setSetlist(d.setlist); alert("✅ Backup restored!"); }
+        else alert("❌ Invalid backup file.");
+      } catch { alert("❌ Could not read file."); }
+    };
+    r.readAsText(file);
+    e.target.value = "";
+  };
+
+  const counts = useMemo(() => ({
+    H: songs.filter(s => s.lang === "H").length,
+    B: songs.filter(s => s.lang === "B").length,
+    R: songs.filter(s => s.lang === "R").length,
+    rep: songs.filter(s => s.repertoire).length,
+  }), [songs]);
+
+  return (
+    <div style={{ minHeight: "100vh", background: T.bg, color: T.text, paddingBottom: 90 }}>
+      {/* Ambient stage glow */}
+      <div style={{ position: "fixed", top: -160, left: "50%", transform: "translateX(-50%)", width: 520, height: 380, background: `radial-gradient(ellipse, ${T.amber}14 0%, transparent 65%)`, pointerEvents: "none", animation: "glow 6s ease-in-out infinite" }} />
+
+      {/* ── HEADER ── */}
+      <div style={{ padding: "26px 18px 6px", maxWidth: 640, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontFamily: "'Fraunces', serif", fontSize: 30, fontWeight: 800, color: T.text, letterSpacing: -0.5 }}>
+              Stage<span style={{ color: T.amber }}>Mate</span> <span style={{ fontSize: 18 }}>🎙️</span>
+            </div>
+            <div style={{ fontSize: 11, color: T.sub, marginTop: 2 }}>Kishore Kumar Edition · {songs.length} songs · {counts.rep} in repertoire</div>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button onClick={exportData} title="Backup" style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, color: T.sub, padding: "8px 10px", fontSize: 14, cursor: "pointer" }}>⬇️</button>
+            <label title="Restore" style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, color: T.sub, padding: "8px 10px", fontSize: 14, cursor: "pointer" }}>
+              ⬆️<input type="file" accept=".json" onChange={importData} style={{ display: "none" }} />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      {tab === "songs" && (
+        <div style={{ maxWidth: 640, margin: "0 auto", padding: "12px 18px" }}>
+          {/* ── SEARCH ── */}
+          <div style={{ position: "relative", marginBottom: 14 }}>
+            <span style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", fontSize: 16, color: T.sub }}>🔍</span>
+            <input ref={searchRef} value={q} onChange={e => setQ(e.target.value)}
+              placeholder="Search song, film, music director…"
+              style={{ width: "100%", padding: "15px 44px", background: T.card, border: `1.5px solid ${q ? T.amber : T.border}`, borderRadius: 16, color: T.text, fontSize: 16, boxSizing: "border-box", outline: "none" }} />
+            {q && <button onClick={() => { setQ(""); searchRef.current?.focus(); }} style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", background: T.card2, border: "none", borderRadius: "50%", width: 26, height: 26, color: T.sub, cursor: "pointer", fontSize: 13 }}>✕</button>}
+          </div>
+
+          {/* ── FILTERS ── */}
+          <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 6, marginBottom: 10 }}>
+            <Chip active={langF === "ALL"} color={T.text} onClick={() => setLangF("ALL")}>All ({songs.length})</Chip>
+            <Chip active={langF === "H"} color={T.hindi} onClick={() => setLangF("H")}>Hindi ({counts.H})</Chip>
+            <Chip active={langF === "B"} color={T.bangla} onClick={() => setLangF("B")}>Bangla ({counts.B})</Chip>
+            <Chip active={langF === "R"} color={T.rabindra} onClick={() => setLangF("R")}>Rabindra ({counts.R})</Chip>
+            <Chip active={repOnly} color={T.green} onClick={() => setRepOnly(r => !r)}>⭐ Repertoire</Chip>
+          </div>
+
+          {/* ── DISCLAIMER (shows once-ish, small) ── */}
+          <div style={{ fontSize: 10.5, color: T.sub, marginBottom: 14, lineHeight: 1.5, opacity: .8 }}>
+            ℹ️ Scales marked are approximate — verify on your harmonium & edit. Credits are editable. Lyrics open from licensed sources.
+          </div>
+
+          {/* ── SONG LIST ── */}
+          {filtered.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "50px 20px", color: T.sub }}>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>🎵</div>
+              <div style={{ fontSize: 14 }}>No songs found{q ? ` for "${q}"` : ""}.</div>
+              <button onClick={() => setShowAdd(true)} style={{ marginTop: 14, background: T.amber, color: "#1a1207", border: "none", borderRadius: 12, padding: "10px 20px", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>＋ Add it now</button>
+            </div>
+          ) : filtered.map(s => {
+            const meta = langMeta[s.lang] || langMeta.H;
+            const sc = s.myScale || s.scale;
+            return (
+              <div key={s.id} onClick={() => setOpenSong(s)} style={{
+                background: T.card, border: `1px solid ${T.border}`, borderLeft: `3px solid ${meta.color}`,
+                borderRadius: 14, padding: "14px 16px", marginBottom: 10, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 12,
+              }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontFamily: "'Fraunces', serif", fontSize: 16, fontWeight: 700, color: T.text, marginBottom: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {s.repertoire && <span style={{ color: T.green }}>⭐ </span>}{s.title}{(s.lyrics||"").trim() && <span style={{ color: T.violet, fontSize: 12 }}> 📜</span>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: T.sub }}>
+                    {s.source}{s.year ? ` · ${s.year}` : ""} · {s.md || "—"}
+                  </div>
+                </div>
+                {sc && (
+                  <div style={{ background: T.card2, borderRadius: 10, padding: "7px 11px", textAlign: "center", flexShrink: 0 }}>
+                    <div style={{ fontFamily: "'Fraunces', serif", fontSize: 14, fontWeight: 800, color: s.myScale ? T.amber2 : T.sub }}>{(parseScale(sc)?.root || sc)}{parseScale(sc)?.minor ? "m" : ""}</div>
+                  </div>
+                )}
+                <button onClick={e => { e.stopPropagation(); toggleSet(s.id); }} title="Add to setlist" style={{
+                  background: inSet(s.id) ? T.violet + "33" : "transparent",
+                  border: `1.5px solid ${inSet(s.id) ? T.violet : T.border}`,
+                  color: inSet(s.id) ? T.violet : T.sub,
+                  borderRadius: 10, width: 36, height: 36, fontSize: 15, cursor: "pointer", flexShrink: 0,
+                }}>{inSet(s.id) ? "✓" : "＋"}</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── SETLIST TAB ── */}
+      {tab === "setlist" && (
+        <div style={{ maxWidth: 640, margin: "0 auto", padding: "12px 18px" }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 800, marginBottom: 4 }}>Tonight's Setlist 🎶</div>
+          <div style={{ fontSize: 12, color: T.sub, marginBottom: 18 }}>{setlist.length} songs · tap a song to open · use arrows to reorder</div>
+          {setlist.length === 0 ? (
+            <div style={{ textAlign: "center", padding: "60px 20px", color: T.sub }}>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>🎤</div>
+              <div style={{ fontSize: 14 }}>Setlist is empty.<br/>Tap ＋ on any song to add it here.</div>
+            </div>
+          ) : setlist.map((id, idx) => {
+            const s = songs.find(x => x.id === id);
+            if (!s) return null;
+            const sc = s.myScale || s.scale;
+            return (
+              <div key={id} style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 14, padding: "12px 14px", marginBottom: 10, display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 800, color: T.amber, width: 28, textAlign: "center", flexShrink: 0 }}>{idx + 1}</div>
+                <div onClick={() => setOpenSong(s)} style={{ flex: 1, minWidth: 0, cursor: "pointer" }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.title}</div>
+                  <div style={{ fontSize: 11, color: T.sub }}>{s.source}{sc ? ` · ${scaleLabel(parseScale(sc)) || sc}` : ""}</div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <button onClick={() => moveSet(idx, -1)} style={{ background: T.card2, border: "none", borderRadius: 6, color: T.sub, width: 28, height: 22, cursor: "pointer", fontSize: 11 }}>▲</button>
+                  <button onClick={() => moveSet(idx, 1)} style={{ background: T.card2, border: "none", borderRadius: 6, color: T.sub, width: 28, height: 22, cursor: "pointer", fontSize: 11 }}>▼</button>
+                </div>
+                <button onClick={() => toggleSet(id)} style={{ background: "transparent", border: `1px solid ${T.red}44`, color: T.red, borderRadius: 8, width: 30, height: 30, cursor: "pointer", fontSize: 12 }}>✕</button>
+              </div>
+            );
+          })}
+          {setlist.length > 0 && (
+            <button onClick={() => { if (window.confirm("Clear the entire setlist?")) setSetlist([]); }} style={{ width: "100%", marginTop: 8, padding: 12, borderRadius: 12, cursor: "pointer", fontSize: 12, fontWeight: 700, background: "transparent", color: T.red, border: `1px solid ${T.red}44` }}>Clear Setlist</button>
+          )}
+        </div>
+      )}
+
+      {/* ── BOTTOM NAV ── */}
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.panel + "f5", backdropFilter: "blur(10px)", borderTop: `1px solid ${T.border}`, display: "flex", justifyContent: "space-around", alignItems: "center", padding: "10px 8px calc(10px + env(safe-area-inset-bottom))", zIndex: 100 }}>
+        <button onClick={() => setTab("songs")} style={{ background: "transparent", border: "none", color: tab === "songs" ? T.amber : T.sub, fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+          <span style={{ fontSize: 20 }}>🎵</span>Songs
+        </button>
+        <button onClick={() => setShowAdd(true)} style={{ background: `linear-gradient(135deg, ${T.amber}, #e8842a)`, border: "none", borderRadius: "50%", width: 54, height: 54, fontSize: 26, color: "#1a1207", cursor: "pointer", fontWeight: 800, boxShadow: `0 6px 20px ${T.amber}55`, marginTop: -22 }}>＋</button>
+        <button onClick={() => setTab("setlist")} style={{ background: "transparent", border: "none", color: tab === "setlist" ? T.amber : T.sub, fontSize: 12, fontWeight: 800, cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, position: "relative" }}>
+          <span style={{ fontSize: 20 }}>🎶</span>Setlist
+          {setlist.length > 0 && <span style={{ position: "absolute", top: -4, right: -10, background: T.violet, color: "#fff", borderRadius: 20, fontSize: 9, fontWeight: 900, padding: "1px 6px" }}>{setlist.length}</span>}
+        </button>
+      </div>
+
+      {/* ── MODALS ── */}
+      {openSong && <SongDetail song={openSong} onClose={() => setOpenSong(null)} onSave={saveSong} onDelete={deleteSong} />}
+      {showAdd && <AddSong onAdd={addSong} onClose={() => setShowAdd(false)} />}
+
+      {/* Footer credit */}
+      <div style={{ textAlign: "center", fontSize: 10, color: T.sub, opacity: .6, padding: "8px 0 4px" }}>
+        StageMate v1 · Conceived by Biswajit Bhattacharjee
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
